@@ -10,7 +10,7 @@ Git attributes preserve the submitted source/Rmd bytes across platforms because 
 
 ## Tested software
 
-The completed release was tested with R 4.5.3 and the following packages. These are recorded versions, not a claim that every other version is incompatible. CI uses R 4.5.3 and installs available compatible CRAN packages; its session information records the versions actually checked.
+The completed release was tested with R 4.5.3 and the following packages. These are recorded versions, not a claim that every other version is incompatible. CI uses R 4.5.3 on Ubuntu 24.04 and installs available compatible CRAN packages; its session information records the versions actually checked. The runner OS is pinned to the tested platform rather than following changes to `ubuntu-latest`.
 
 | Purpose | Packages and tested versions |
 |:--|:--|
