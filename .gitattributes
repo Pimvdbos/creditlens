@@ -1,0 +1,7 @@
+* text=auto eol=lf
+# Integrity checks use the original submitted bytes, including line endings.
+submission/CreditLens.R -text
+submission/individual_assignment.Rmd -text
+*.rds binary
+*.pdf binary
+*.png binary

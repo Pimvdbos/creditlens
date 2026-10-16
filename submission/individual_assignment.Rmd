@@ -1,0 +1,462 @@
+---
+title: "CreditLens: predicting credit-card payment default"
+author: "Pim van den Bos"
+date: "15 October 2026"
+output:
+  pdf_document:
+    fig_caption: true
+fontsize: 10pt
+geometry: "a4paper, margin=2cm"
+header-includes:
+  - |
+    \usepackage{float}
+    \usepackage{booktabs}
+    \usepackage{fvextra}
+    \usepackage{fancyhdr}
+    \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\},fontsize=\scriptsize}
+    \setlength{\parskip}{4pt}
+    \setlength{\parindent}{0pt}
+    \pagestyle{fancy}
+    \fancyhf{}
+    \fancyfoot[L]{\small CreditLens | Pim van den Bos}
+    \fancyfoot[R]{\small \thepage}
+    \renewcommand{\headrulewidth}{0pt}
+    \renewcommand{\footrulewidth}{0.3pt}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE, message = FALSE, warning = TRUE,
+  fig.align = "center", dpi = 180, fig.pos = "H"
+)
+source("CreditLens.R", local = TRUE)
+assets <- load_creditlens_assets(root = getwd())
+invisible(list2env(assets$report$objects, envir = environment()))
+chosen_cv <- cv[cv$family == lock$chosen, ]
+chosen_test <- e$metrics[e$metrics$family == lock$chosen, ]
+forest_test <- e$metrics[e$metrics$family == "forest", ]
+baseline_test <- e$metrics[e$metrics$family == "baseline", ]
+threshold <- e$thresholds[e$thresholds$family == lock$chosen, ]
+cal <- e$calibration_numbers[e$calibration_numbers$family == lock$chosen, ]
+
+f <- function(x, digits = 3) {
+  formatC(x, format = "f", digits = digits)
+}
+n <- function(x) {
+  format(x, big.mark = ",", scientific = FALSE, trim = TRUE)
+}
+percent <- function(x, digits = 1) {
+  paste0(f(100 * x, digits), "%")
+}
+table_report <- function(data, caption, digits = 3) {
+  knitr::kable(
+    data, caption = caption, digits = digits, row.names = FALSE,
+    booktabs = TRUE, position = "H"
+  )
+}
+report_figures <- lapply(assets$report$figures, function(bytes) {
+  path <- tempfile(fileext = ".png")
+  writeBin(bytes, path)
+  normalizePath(path, winslash = "/")
+})
+```
+
+# Introduction and data
+
+CreditLens asks: **using information available at the end of six months of
+credit-card history, how accurately can the recorded default-payment outcome
+in the following month be predicted?** A probability, together with its
+validation, helps students and analysts understand uncertainty and the
+consequences of choosing a classification threshold.
+
+The UCI Default of Credit Card Clients dataset describes Taiwanese customers
+with April-September 2005 histories [1]. The downloaded Kaggle CSV contains
+`r n(a$audit$rows)` customers, `r a$audit$columns` columns and
+`r n(a$audit$events)` defaults (`r percent(a$audit$events / a$audit$rows, 2)`).
+All 750,000 cell values were checked against the original UCI workbook.
+Source URLs, file hashes and the comparison record are retained in the
+accompanying asset file.
+
+Each observation is one customer. All `r n(a$audit$unique_ids)` identifiers
+are unique. No values are missing, no rows are exact duplicates and no
+customers were excluded. The `r a$audit$duplicate_profiles` matching predictor
+profiles across different identifiers remain separate customers. The outcome
+is **0 = no recorded default payment; 1 = recorded default payment**
+(internally No/Yes). It concerns the following month; the supplier does not
+fully define its operational ascertainment. It is not assumed to be an annual
+or regulatory default definition.
+
+```{r candidates}
+table_report(
+  data.frame(
+    Group = c("Credit limit", "Age", "Repayment status", "Bill statement", "Previous payment"),
+    Variables = c("LIMIT_BAL", "AGE", "PAY_0, PAY_2-PAY_6", "BILL_AMT1-BILL_AMT6", "PAY_AMT1-PAY_AMT6"),
+    Count = c(1, 1, 6, 6, 6),
+    Unit = c("NT dollars", "years", "category", "NT dollars", "NT dollars")
+  ),
+  "Twenty original candidate predictors before selection.", digits = 0
+)
+```
+
+The six monthly columns run from September, the most recent, back to April.
+ID and outcome are excluded from predictors. Sex, education and marital status
+are omitted to focus on payment history and financial information. This
+choice does not establish fairness or remove every demographic proxy.
+
+The development sample contains `r n(dev_n)` customers and
+`r n(dev_events)` defaults. Mean age is
+`r f(numeric_summary$mean[numeric_summary$variable == "AGE"], 1)` years
+(SD `r f(numeric_summary$SD[numeric_summary$variable == "AGE"], 1)`). Median
+credit limit is NT$`r n(numeric_summary$median[numeric_summary$variable == "LIMIT_BAL"])`
+(IQR NT$`r n(numeric_summary$Q1[numeric_summary$variable == "LIMIT_BAL"])`-
+`r n(numeric_summary$Q3[numeric_summary$variable == "LIMIT_BAL"])`). In this
+sample, observed default proportions are
+`r percent(status_summary$rate[status_summary$status == "0"])` for September
+code 0 and `r percent(status_summary$rate[status_summary$status == "3+"])`
+for 3+. These are descriptive associations, not causal effects or screening
+criteria. The app supplies credit-limit distributions and status proportions
+with sample counts and exact binomial intervals.
+
+\newpage
+
+# Methods: preparation and fitted procedures
+
+All five approaches use the same 20 candidates and customers. Preparation is
+fitted within the permitted training sample; no univariate significance
+screening is performed. Complete data require no imputation. Missing required
+app inputs are rejected explicitly.
+
+Repayment codes are **nominal categories**, with -1 as reference. The expanded
+published descriptions are -2 = no consumption, -1 = paid in full and
+0 = use of revolving credit [2, 3]. The abbreviated UCI description uses
+"paid duly" for -1 and omits -2 and 0. Revolving credit is not interpreted as
+a precisely defined minimum payment. Codes -2, -1 and 0 remain distinct;
+positive codes describe months of delay, with 3-9 grouped into 3+.
+
+Within each training sample, code 1 is pooled into code 2 if fewer than 50
+training observations have code 1. The final fitted mapping preserves
+September code 1 and pools it for August-April. This predictor-only safeguard
+followed a separating sparse category in an initial bootstrap pilot. All
+200 final bootstrap replicates were restarted; stored checks established
+identical outer/inner CV encodings under the revised rule. Complete-development
+fits were regenerated before test evaluation. No holdout outcome chose the
+mapping. This historical correction and its diagnostics are retained.
+
+Monetary predictors use the fixed transformation
+\(g(x)=\operatorname{sign}(x)\log(1+|x|/1000)\), for raw NT-dollar amount
+\(x\). It accommodates skewness, zeros and valid negative bills without
+truncation. Age stays numerical. Factors use dummy terms for the linear models.
+
+```{r specifications}
+table_report(
+  data.frame(
+    Model = c("Full logistic", "LDA", "LASSO logistic", "Backward AIC", "Probability forest"),
+    Specification = c(
+      "Binomial logit; all 20 candidates; additive log-odds",
+      "Empirical class priors; common covariance; scaled full-rank matrix",
+      "Binomial glmnet; alpha = 1; retain penalized coefficients",
+      "Full logistic start; backward AIC (k = 2); whole factors",
+      "ranger; 500 trees; probability forest; ordered factor handling"
+    )
+  ),
+  "Primary model specifications."
+)
+```
+
+Logistic regression assumes additivity on the transformed log-odds scale.
+Convergence, rank, finite coefficients and boundary probabilities are checked.
+Full-model joint likelihood-ratio tests and IQR odds contrasts are descriptive
+diagnostics; they do not select predictors. Odds ratios multiply odds, not
+probabilities. LDA's class-conditional normality and common-covariance
+assumptions are restrictive with these mixed categories and skewed histories
+[4]. Training-only rank checks identify constant/dependent design columns.
+
+For LASSO, preparation and standardization are repeated inside each inner
+training fit. A decreasing, training-generated path of 100 penalties is
+assessed by binomial deviance (twice log loss). The **one-SE rule** chooses
+the largest penalty whose estimated loss is within one fold-based standard
+error of the minimum [5]. Here SE is the SD of five fold losses divided by
+\(\sqrt{5}\). This favors a stronger penalty and simpler fit within that
+uncertainty allowance; it is separate from choosing the final model family.
+The minimum-loss penalty is retained as a development sensitivity analysis.
+
+The forest tunes mtry 4, 8 or 12 and minimum node size 10 or 30 by shared
+inner-CV log loss; exact ties favor larger nodes, then lower mtry [6]. Its
+final settings are `r spec$specification[spec$family == "forest"]`.
+Out-of-bag error is supplementary and does not choose the final family.
+
+\newpage
+
+# Methods: validation, final choice and uncertainty
+
+**Holdout validation.** Seed 5 reserves approximately 20% of each outcome
+class: `r n(dev_n)` development and `r n(test_n)` test customers, with
+`r n(dev_events)` and `r n(test_events)` defaults. IDs are disjoint.
+Data-quality checks precede splitting. Detailed exploration, support ranges,
+presets, tuning and model selection use development data only.
+
+**Nested cross-validation.** Five stratified outer development folds are
+shared by all families. Within each outer training sample, five shared inner
+folds tune LASSO and the forest. Backward selection is repeated in every outer
+training sample. Each development customer receives one outer-held-out
+probability per family. All procedures are then fitted to complete development
+data, using a separately saved five-fold allocation for final tuning. Split,
+fold, seed and diagnostic records are retained. These are forms of internal
+validation, not evidence of performance in a new time or population [4].
+
+**Bootstrap validation and stability.** Seed 5005 generates 200 saved samples
+of development customers with replacement. Every replicate refits preparation,
+the full logistic starting model and backward AIC selection. It evaluates its
+fitted pipeline on both the bootstrap sample and original development sample
+[4]. With AUC denoted by \(C\), mean optimism and corrected apparent AUC are
+
+\[
+\widehat O=\frac{1}{200}\sum_{b=1}^{200}
+(C_{b,\mathrm{boot}}-C_{b,\mathrm{original}}),
+\qquad C_{\mathrm{corrected}}=C_{\mathrm{apparent}}-\widehat O.
+\]
+
+Original-variable inclusion frequencies describe **backward-AIC stability**,
+not LASSO stability or causal importance. At 50% inclusion, 200 replicates
+give Monte Carlo SE about 3.5 percentage points. The correction is reported
+as a point estimate; percentiles of a fixed apparent AUC minus replicate
+optimism do not capture full development uncertainty.
+
+**Performance measures.** Log loss is the primary probability-quality measure:
+it penalizes confident errors heavily. Brier score is mean squared probability
+error. Lower is better for both. AUC measures default/non-default ranking,
+counting ties as half-correct; higher is better. Probabilities are clipped to
+[1e-15, 1-1e-15] only for logarithms. CV summaries pool outer-held-out
+predictions; log loss equals the fold-size-weighted mean. A constant baseline
+uses enclosing-training prevalence. Calibration plots compare probabilities
+with observed rates in equal-count bins, with exact binomial intervals.
+
+**Why LASSO was selected.** Before opening the holdout, the prespecified rule
+identified the forest's minimum CV log loss,
+`r f(min(lock$metrics$LogLoss), 4)`. Eligible families had loss no more than
+1% above this and AUC no more than 0.01 below that family's AUC. LASSO
+qualified: CV loss `r f(chosen_cv$LogLoss, 4)`, AUC `r f(chosen_cv$AUC, 4)`.
+Among eligible families it required the fewest original inputs: **14**, versus
+16 for backward AIC and 20 for full logistic and the forest. Remaining ties
+would use lower loss, then the fixed order LASSO, backward, full, LDA, forest.
+These are practical tolerances, not equivalence tests. Fewer required entries
+and an inspectable additive log-odds structure motivated the trade-off;
+fewer inputs do not automatically guarantee better generalization.
+
+**Locked evaluation.** The selected family, fitted settings, required inputs
+and model hashes were locked before test evaluation. Test AUC intervals and
+one paired LASSO-versus-forest DeLong comparison condition on these fixed
+fits [4, 7]; they omit variability from repeating development. Threshold 0.50
+is prespecified, with flagging when probability is at least the threshold.
+The app retains the development-fitted LASSO: no holdout tuning, recalibration,
+threshold selection or development-plus-test refitting is performed.
+
+\newpage
+
+# Results: performance and threshold interpretation
+
+```{r comparison}
+comparison <- merge(
+  e$metrics, cv[, c("family", "LogLoss")],
+  by = "family", suffixes = c("_test", "_CV"), sort = FALSE
+)
+comparison <- comparison[match(c(families, "baseline"), comparison$family), ]
+table_report(
+  data.frame(
+    Model = unname(model_labels[comparison$family]),
+    Inputs = c(spec$original_inputs[match(families, spec$family)], 0),
+    `CV loss` = f(comparison$LogLoss_CV, 4),
+    `Test AUC (95% CI)` = sprintf(
+      "%.4f (%.4f-%.4f)", comparison$AUC, comparison$Lower, comparison$Upper
+    ),
+    `Test loss` = f(comparison$LogLoss_test, 4),
+    Brier = f(comparison$Brier, 4), check.names = FALSE
+  ),
+  paste0("Shared development CV and final holdout (", n(test_n), " customers).")
+)
+```
+
+The forest subsequently performed better on the holdout across all three
+reported measures: AUC `r f(forest_test$AUC, 4)` versus
+`r f(chosen_test$AUC, 4)`, log loss `r f(forest_test$LogLoss, 4)` versus
+`r f(chosen_test$LogLoss, 4)` and Brier `r f(forest_test$Brier, 4)` versus
+`r f(chosen_test$Brier, 4)` for LASSO. The paired **forest-minus-LASSO AUC
+advantage** is `r f(-e$paired$difference, 4)` (95% CI
+`r f(-e$paired$CI[2], 4)`-`r f(-e$paired$CI[1], 4)`;
+p = `r format.pval(e$paired$p, digits = 3)`). This supports a small ranking
+advantage conditional on the trained fits. The models are not established
+as statistically equivalent. LASSO remains implemented because of the
+prespecified development-performance and input-count trade-off.
+
+```{r roc-calibration, out.width='100%', fig.cap='Fixed-model holdout ROC and calibration. Calibration points show equal-count bins with exact binomial 95% intervals; axes span 0-1.'}
+knitr::include_graphics(report_figures$roc_calibration, rel_path = FALSE)
+```
+
+LASSO ranks a random default/non-default pair correctly about
+`r percent(chosen_test$AUC, 1)` of the time, counting ties as half-correct.
+Its loss and Brier improve on the constant baseline
+(`r f(baseline_test$LogLoss, 4)` and `r f(baseline_test$Brier, 4)`). Calibration
+intercept is `r f(cal$Intercept)`, slope `r f(cal$Slope)` and offset intercept
+`r f(cal$OffsetIntercept)` (ideal 0, 1 and 0). Point estimates near ideal
+values and wide bin intervals do not establish perfect calibration; local
+departures remain possible.
+
+At threshold **0.50**, the LASSO gives **`r n(threshold$TP)` true positives,
+`r n(threshold$FN)` missed defaults, `r n(threshold$FP)` false alarms and
+`r n(threshold$TN)` true negatives**. It misses
+`r n(threshold$FN)` of `r n(test_events)` observed defaults
+(**`r percent(threshold$FN / test_events)`**). Sensitivity is
+`r percent(threshold$Sensitivity)`, specificity
+`r percent(threshold$Specificity)`, PPV `r percent(threshold$PPV)` and accuracy
+`r percent(threshold$Accuracy)`. Lowering the threshold flags more customers,
+increasing sensitivity while reducing specificity. High accuracy alone can
+conceal many missed defaults in this imbalanced sample. These trade-offs
+require decision costs and fresh validation before any operational policy.
+
+\newpage
+
+# Results: final model, importance and application
+
+The final LASSO uses 14 original inputs: age, credit limit, six repayment
+statuses and six previous payments. All six bill coefficients are zero.
+There are `r length(model$selected_terms)` nonzero terms plus intercept, at
+lambda `r f(model$settings$lambda, 9)`, without an unpenalized refit.
+The intercept is `r f(model$settings$coefficients["(Intercept)"], 4)`;
+September category coefficients relative to -1 (paid in full) are
+`r f(model$settings$coefficients["PAY_01"], 4)` for 1,
+`r f(model$settings$coefficients["PAY_02"], 4)` for 2 and
+`r f(model$settings$coefficients["PAY_03+"], 4)` for 3+.
+Coefficients add on the log-odds scale. The full nonzero table, intercept,
+references and transformations are supplied in the asset file and app.
+No ordinary unpenalized p-values are attached to selected coefficients.
+
+```{r importance}
+top <- head(importance, 4)
+table_report(
+  data.frame(
+    Input = top$variable,
+    `CV permutation loss increase` = f(top$increase, 4),
+    `Backward inclusion (%)` = f(
+      100 * stability$frequency[match(top$variable, stability$variable)], 1
+    ), check.names = FALSE
+  ),
+  "LASSO-procedure importance and separate backward-AIC stability."
+)
+```
+
+Permutation importance averages the increase in outer-held-out log loss
+after shuffling an original input, using three repetitions per fold. It
+describes the **selected LASSO procedure**: outer-fold fits can retain
+different variables from the deployed complete-development fit. Correlated
+histories can share predictive information. Backward inclusion frequencies
+come from a different procedure and do not measure LASSO selection stability.
+Backward apparent AUC `r f(boot$apparent_AUC, 4)` minus mean optimism
+`r f(boot$mean_optimism, 4)` yields `r f(boot$corrected_AUC, 4)` (200 successful
+replicates; zero failures). This is slightly above backward outer-CV AUC
+`r f(cv$AUC[cv$family == "backward"], 4)`; the assessments use different
+training samples and correction procedures. Neither replaces the holdout.
+
+Repayment effects are not constrained to increase. In the saved higher
+preset, holding everything else fixed, September codes 1, 2 and 3+ give
+`r paste(percent(repayment_sensitivity$probability), collapse = ", ")`,
+respectively. Sparse severe-delay groups, correlated histories and
+unconstrained nominal effects can produce this pattern. It is not by itself
+a programming error, and coefficients were not manually altered. Profile
+changes describe predictions, not causal intervention effects.
+
+The three-page app explains the data, makes frozen-model predictions and
+explores holdout performance. It highlights 14 active inputs, collapses the
+excluded bill candidates, and compares saved A with current B in percentage
+points alongside changed inputs. Lower, middle and higher presets give
+9.5%, 15.5% and 53.0%; lower-to-higher is +43.5 percentage points. Required
+input edits clear stale results. Validation, reset, safe preset loading and
+extrapolation notices support interpretation. The performance page shows
+missed defaults, false alarms and a threshold marker on ROC; AUC, loss and
+Brier stay fixed as the threshold changes. PPV is undefined if nobody is flagged.
+
+```{r app-view, out.width='55%', fig.cap='Predicted probability and saved-scenario comparison in CreditLens.'}
+if (!is.null(report_figures$app_predict)) {
+  knitr::include_graphics(report_figures$app_predict, rel_path = FALSE)
+}
+```
+
+Public application: [pimvdb.shinyapps.io/creditlens](`r deployment$url`).
+App and report use release **`r identity$release_id`**, model
+**`r substr(identity$model_id, 1, 12)`**.
+
+\newpage
+
+# Discussion and conclusions
+
+CreditLens implements a complete workflow: five model families, shared nested
+cross-validation, a reserved holdout and a 200-replicate backward-procedure
+bootstrap. The selected LASSO balances development probability performance
+with fewer required inputs and an inspectable additive structure. It does
+not have the best holdout performance: the forest performs better in ranking,
+log loss and Brier score. Keeping the original choice preserves the stated
+performance-simplicity decision instead of selecting again using test outcomes.
+
+LASSO offers useful, imperfect discrimination and better probability quality
+than predicting prevalence for everyone. Calibration needs separate scrutiny;
+near-ideal point estimates are insufficient evidence of accurate probabilities
+throughout the risk range. At 0.50, high specificity coexists with missing
+about 69% of defaults. Users should therefore consider sensitivity, specificity,
+predictive value and the costs of errors together, rather than accuracy alone.
+Moving a threshold in the app illustrates this trade-off; it does not discover
+a validated lending policy.
+
+Strengths include verified source data, no unnecessary imputation, retention
+of valid extreme and negative amounts, shared evaluation samples,
+training-only preparation and tuning, repetition of backward selection inside
+resampling, and a family lock preceding test evaluation. Stored fitted assets
+and shared prediction functions connect the report to the app. Supporting
+records distinguish CV importance, backward stability and final coefficients.
+
+Limitations concern both data and modeling. The historical Taiwanese cohort
+does not establish performance in contemporary banking or another country.
+The supplier-specific outcome is incompletely defined. Grouped categories and
+fixed monetary transformations simplify measurement. Additive log-odds and
+LDA assumptions restrict the linear approaches; the forest grid is finite.
+Sparse severe delays and correlated monthly histories affect coefficients,
+selection and importance, including the non-monotonic category example.
+Penalized coefficients are predictive associations, not causal estimates.
+Omitting demographic fields does not establish fairness. Conditional holdout
+intervals omit variability from a new split, tuning and model-family selection.
+
+Further work should use temporal or geographic validation, clearer outcome
+ascertainment, subgroup calibration checks and explicit decision costs.
+Recalibration, if needed for a new population, would require separate
+development and evaluation data. The current app is useful for teaching and
+communicating prediction models; its evidence does not support present-day
+automated credit decisions.
+
+## References
+
+1. Yeh, I. (2009). *Default of Credit Card Clients*. UCI Machine Learning Repository.
+   [doi:10.24432/C55S3H](https://doi.org/10.24432/C55S3H). CC BY 4.0.
+2. Chen, D. and Ye, W. (2022). *Monotonic Neural Additive Models: Pursuing Regulated
+   Machine Learning Models for Credit Scoring*, section 4.1.1.
+   [arXiv:2209.10070](https://arxiv.org/pdf/2209.10070).
+3. H2O.ai. *Machine Learning Interpretability*, dataset coding.
+   [Tutorial](https://h2oai.github.io/tutorials/machine-learning-interpretability/).
+4. Groothuis-Oudshoorn, K. and Mikhal, J. (2026). *Applied Statistical Learning*:
+   supplied lectures on model development, validation, categorical regression and calibration.
+5. Hastie, T. et al. *An introduction to glmnet*.
+   [Documentation](https://glmnet.stanford.edu/articles/glmnet.html).
+6. Wright, M. N. et al. *ranger*.
+   [Reference](https://imbs-hl.github.io/ranger/reference/ranger.html).
+7. DeLong, E. R., DeLong, D. M. and Clarke-Pearson, D. L. (1988). Comparing the
+   areas under two or more correlated ROC curves. *Biometrics*, 44, 837-845.
+   [doi:10.2307/2531595](https://doi.org/10.2307/2531595).
+
+\newpage
+
+# R code appendix
+
+```{r submitted-code, results='asis'}
+code <- readLines("CreditLens.R", warn = FALSE)
+for (start in seq(1L, length(code), by = 80L)) {
+  end <- min(start + 79L, length(code))
+  cat("\n```r\n", paste(code[start:end], collapse = "\n"), "\n```\n", sep = "")
+}
+```

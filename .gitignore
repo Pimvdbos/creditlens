@@ -1,0 +1,24 @@
+# Local R, rendering, analysis and hosting state
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+.Renviron
+.Rprofile
+renv/
+rsconnect/
+analysis_work/
+data/
+Data/
+results/
+tmp/
+*.log
+*.aux
+*.out
+*.tex
+*_cache/
+*_files/
+submission/individual_assignment.knit.md
+submission/individual_assignment.utf8.md
+.DS_Store
+Thumbs.db
