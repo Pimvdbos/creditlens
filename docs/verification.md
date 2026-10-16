@@ -12,6 +12,9 @@ Checked on **16 October 2026** for frozen release **CL-b2563abe35c5**, model **f
 | PDF inspection | All six narrative pages visually inspected; no clipping or broken tables found; public-app hyperlink present; 39 code-appendix pages follow |
 | Publication review | No credentials, email addresses or machine-specific paths found in saved asset character fields; submitted source/report reviewed; only the canonical four files and deliberate portfolio material are included |
 | Statistical preservation | All four canonical file SHA-256 hashes match the completed submission; no retraining, retuning, coefficient changes or new release was needed |
+| Fresh GitHub checkout | Repository checks and the documented report command passed from a clean clone in a path with spaces |
+| GitHub presentation | Anonymous browser confirmed the rendered five-model table, both full-resolution images, all four submission links, live-app link and the displayed PDF |
+| GitHub Actions | [Initial public run passed on Linux / R 4.5.3](https://github.com/Pimvdbos/creditlens/actions/runs/38881363897); subsequent revision results remain visible in Actions |
 
 The saved examples still predict **9.5%, 15.5% and 53.0%**; lower A versus higher B is **+43.5 percentage points**. The hosted app, RDS and report identify the same model/release. The public deployment was reused, with no duplicate hosted application.
 
